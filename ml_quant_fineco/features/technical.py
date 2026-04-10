@@ -1,6 +1,10 @@
 """
 Feature engineering module for generating technical indicators and ML-ready features.
 
+Uses the ``ta`` library (https://github.com/bukosabino/ta) for standard-compliant
+technical indicator computation.  All indicators follow widely-accepted formulas
+(Wilder smoothing for RSI/ATR, standard MACD parameters, etc.).
+
 Produces labeled datasets suitable for classification (up/down) or regression
 (next-day return) models.
 """
@@ -10,12 +14,61 @@ from typing import List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
+from ta.trend import (
+    SMAIndicator,
+    EMAIndicator,
+    WMAIndicator,
+    MACD,
+    ADXIndicator,
+    CCIIndicator,
+    IchimokuIndicator,
+    PSARIndicator,
+    TRIXIndicator,
+    VortexIndicator,
+    AroonIndicator,
+    KSTIndicator,
+    stc,
+)
+from ta.momentum import (
+    RSIIndicator,
+    StochasticOscillator,
+    WilliamsRIndicator,
+    StochRSIIndicator,
+    ROCIndicator,
+    UltimateOscillator,
+    TSIIndicator,
+    KAMAIndicator,
+    PercentagePriceOscillator,
+    AwesomeOscillatorIndicator,
+)
+from ta.volatility import (
+    BollingerBands,
+    AverageTrueRange,
+    KeltnerChannel,
+    DonchianChannel,
+    UlcerIndex,
+)
+from ta.volume import (
+    OnBalanceVolumeIndicator,
+    VolumePriceTrendIndicator,
+    ChaikinMoneyFlowIndicator,
+    MFIIndicator,
+    ForceIndexIndicator,
+    EaseOfMovementIndicator,
+    VolumeWeightedAveragePrice,
+    NegativeVolumeIndexIndicator,
+    AccDistIndexIndicator,
+)
 
 logger = logging.getLogger(__name__)
 
 
 class FeatureEngineer:
-    """Generate technical features and ML labels from OHLCV data."""
+    """Generate technical features and ML labels from OHLCV data.
+
+    All indicators are computed via the ``ta`` library, ensuring correct
+    mathematical definitions (e.g. Wilder-smoothed RSI, EMA-based MACD).
+    """
 
     def __init__(self, label_method: str = "return_sign", forward_period: int = 1):
         """
@@ -45,11 +98,17 @@ class FeatureEngineer:
         # --- Price-based features ---
         result = self._add_price_features(result)
 
-        # --- Volume-based features ---
-        result = self._add_volume_features(result)
+        # --- Trend indicators (MA, MACD, ADX, Ichimoku, etc.) ---
+        result = self._add_trend_indicators(result)
 
-        # --- Technical indicators ---
-        result = self._add_technical_indicators(result)
+        # --- Momentum indicators (RSI, Stochastic, Williams %R, etc.) ---
+        result = self._add_momentum_indicators(result)
+
+        # --- Volatility indicators (Bollinger, ATR, Keltner, etc.) ---
+        result = self._add_volatility_indicators(result)
+
+        # --- Volume indicators (OBV, VPT, CMF, MFI, etc.) ---
+        result = self._add_volume_indicators(result)
 
         # --- Lag features ---
         result = self._add_lag_features(result)
@@ -89,7 +148,7 @@ class FeatureEngineer:
         # Intraday features
         df["intraday_range"] = (high - low) / close
         df["gap"] = (opn - close.shift(1)) / close.shift(1)
-        df["oc_ratio"] = (close - opn) / opn  # close vs open
+        df["oc_ratio"] = (close - opn) / opn
         df["hl_ratio"] = (high - low) / (high + low + 1e-10)
 
         # Log returns
@@ -97,109 +156,284 @@ class FeatureEngineer:
 
         return df
 
-    def _add_volume_features(self, df: pd.DataFrame) -> pd.DataFrame:
-        """Volume-based features."""
-        vol = df["Volume"].astype(float)
-        close = df["Close"]
+    # ------------------------------------------------------------------
+    # Trend indicators
+    # ------------------------------------------------------------------
 
+    def _add_trend_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Trend-based technical indicators via ``ta.trend``."""
+        close = df["Close"]
+        high = df["High"]
+        low = df["Low"]
+        opn = df["Open"]
+
+        # --- Simple Moving Averages (SMA) ---
+        for window in [5, 10, 20, 60]:
+            df[f"sma_{window}"] = SMAIndicator(
+                close=close, window=window
+            ).sma_indicator()
+
+        # --- Exponential Moving Averages (EMA) ---
+        df["ema_12"] = EMAIndicator(close=close, window=12).ema_indicator()
+        df["ema_26"] = EMAIndicator(close=close, window=26).ema_indicator()
+
+        # --- Weighted Moving Average (WMA) ---
+        df["wma_20"] = WMAIndicator(close=close, window=20).wma()
+
+        # --- MACD (Moving Average Convergence Divergence) ---
+        macd = MACD(close=close, window_slow=26, window_fast=12, window_sign=9)
+        df["macd"] = macd.macd()
+        df["macd_signal"] = macd.macd_signal()
+        df["macd_hist"] = macd.macd_diff()
+
+        # --- SMA cross signals ---
+        df["sma_5_20_cross"] = df["sma_5"] - df["sma_20"]
+        df["sma_10_60_cross"] = df["sma_10"] - df["sma_60"]
+
+        # --- ADX (Average Directional Index) with +DI / -DI ---
+        adx = ADXIndicator(high=high, low=low, close=close, window=14)
+        df["adx"] = adx.adx()
+        df["adx_pos"] = adx.adx_pos()
+        df["adx_neg"] = adx.adx_neg()
+
+        # --- CCI (Commodity Channel Index) ---
+        df["cci"] = CCIIndicator(
+            high=high, low=low, close=close, window=20
+        ).cci()
+
+        # --- Ichimoku Cloud ---
+        ichimoku = IchimokuIndicator(
+            high=high, low=low, window1=9, window2=26, window3=52
+        )
+        df["ichimoku_a"] = ichimoku.ichimoku_a()
+        df["ichimoku_b"] = ichimoku.ichimoku_b()
+        df["ichimoku_base"] = ichimoku.ichimoku_base_line()
+        df["ichimoku_conversion"] = ichimoku.ichimoku_conversion_line()
+
+        # --- Parabolic SAR ---
+        df["psar"] = PSARIndicator(
+            high=high, low=low, close=close, step=0.02, max_step=0.2
+        ).psar()
+        # SAR-based direction signal: 1 if price above SAR (bullish)
+        df["psar_signal"] = (close > df["psar"]).astype(int)
+
+        # --- TRIX (Triple Exponential Moving Average) ---
+        df["trix"] = TRIXIndicator(close=close, window=20).trix()
+
+        # --- Vortex Indicator ---
+        vortex = VortexIndicator(high=high, low=low, close=close, window=14)
+        df["vortex_pos"] = vortex.vortex_indicator_pos()
+        df["vortex_neg"] = vortex.vortex_indicator_neg()
+        df["vortex_diff"] = df["vortex_pos"] - df["vortex_neg"]
+
+        # --- Aroon Indicator ---
+        aroon = AroonIndicator(high=high, low=low, window=25)
+        df["aroon_up"] = aroon.aroon_up()
+        df["aroon_down"] = aroon.aroon_down()
+        df["aroon_indicator"] = aroon.aroon_indicator()
+
+        # --- KST (Know Sure Thing) ---
+        kst = KSTIndicator(close=close)
+        df["kst"] = kst.kst()
+        df["kst_signal"] = kst.kst_sig()
+        df["kst_diff"] = kst.kst_diff()
+
+        # --- Schaff Trend Cycle (STC) ---
+        df["stc"] = stc(close, window_fast=23, window_slow=50, cycle=10)
+
+        # --- Percentage Price Oscillator (PPO) ---
+        ppo = PercentagePriceOscillator(close=close)
+        df["ppo"] = ppo.ppo()
+        df["ppo_signal"] = ppo.ppo_signal()
+        df["ppo_hist"] = ppo.ppo_hist()
+
+        return df
+
+    # ------------------------------------------------------------------
+    # Momentum indicators
+    # ------------------------------------------------------------------
+
+    def _add_momentum_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Momentum-based technical indicators via ``ta.momentum``."""
+        close = df["Close"]
+        high = df["High"]
+        low = df["Low"]
+
+        # --- RSI (Wilder-smoothed Relative Strength Index) ---
+        df["rsi_14"] = RSIIndicator(close=close, window=14).rsi()
+        df["rsi_7"] = RSIIndicator(close=close, window=7).rsi()
+        df["rsi_21"] = RSIIndicator(close=close, window=21).rsi()
+
+        # --- Stochastic Oscillator (%K, %D) ---
+        stoch = StochasticOscillator(
+            high=high, low=low, close=close, window=14, smooth_window=3
+        )
+        df["stoch_k"] = stoch.stoch()
+        df["stoch_d"] = stoch.stoch_signal()
+
+        # --- Stochastic RSI ---
+        stochrsi = StochRSIIndicator(close=close, window=14, smooth1=3, smooth2=3)
+        df["stochrsi_k"] = stochrsi.stochrsi_k()
+        df["stochrsi_d"] = stochrsi.stochrsi_d()
+
+        # --- Williams %R ---
+        df["willr"] = WilliamsRIndicator(
+            high=high, low=low, close=close, lbp=14
+        ).williams_r()
+
+        # --- ROC (Rate of Change) ---
+        for period in [5, 10, 20]:
+            df[f"roc_{period}"] = ROCIndicator(close=close, window=period).roc()
+
+        # --- Ultimate Oscillator ---
+        df["ultimate_osc"] = UltimateOscillator(
+            high=high, low=low, close=close
+        ).ultimate_oscillator()
+
+        # --- TSI (True Strength Index) ---
+        df["tsi"] = TSIIndicator(close=close).tsi()
+
+        # --- KAMA (Kaufman Adaptive Moving Average) ---
+        df["kama_10"] = KAMAIndicator(close=close, window=10).kama()
+        df["kama_20"] = KAMAIndicator(close=close, window=20).kama()
+
+        # --- Awesome Oscillator ---
+        df["awesome_osc"] = AwesomeOscillatorIndicator(
+            high=high, low=low
+        ).awesome_oscillator()
+
+        return df
+
+    # ------------------------------------------------------------------
+    # Volatility indicators
+    # ------------------------------------------------------------------
+
+    def _add_volatility_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Volatility-based technical indicators via ``ta.volatility``."""
+        close = df["Close"]
+        high = df["High"]
+        low = df["Low"]
+
+        # --- Bollinger Bands ---
+        bb = BollingerBands(close=close, window=20, window_dev=2)
+        df["bb_upper"] = bb.bollinger_hband()
+        df["bb_lower"] = bb.bollinger_lband()
+        df["bb_mavg"] = bb.bollinger_mavg()
+        df["bb_pct"] = bb.bollinger_pband()
+        df["bb_width"] = bb.bollinger_wband()
+
+        # --- ATR (Average True Range, Wilder smoothed) ---
+        atr_14 = AverageTrueRange(high=high, low=low, close=close, window=14)
+        df["atr_14"] = atr_14.average_true_range()
+        atr_7 = AverageTrueRange(high=high, low=low, close=close, window=7)
+        df["atr_7"] = atr_7.average_true_range()
+        # Normalized ATR (as percentage of closing price)
+        df["atr_pct_14"] = df["atr_14"] / close
+
+        # --- Keltner Channel ---
+        keltner = KeltnerChannel(
+            high=high, low=low, close=close, window=20, window_atr=10
+        )
+        df["keltner_upper"] = keltner.keltner_channel_hband()
+        df["keltner_lower"] = keltner.keltner_channel_lband()
+        df["keltner_pct"] = keltner.keltner_channel_pband()
+        df["keltner_width"] = keltner.keltner_channel_wband()
+
+        # --- Donchian Channel ---
+        donchian = DonchianChannel(high=high, low=low, close=close, window=20)
+        df["donchian_upper"] = donchian.donchian_channel_hband()
+        df["donchian_lower"] = donchian.donchian_channel_lband()
+        df["donchian_pct"] = donchian.donchian_channel_pband()
+        df["donchian_width"] = donchian.donchian_channel_wband()
+
+        # --- Ulcer Index ---
+        df["ulcer_index"] = UlcerIndex(close=close, window=14).ulcer_index()
+
+        return df
+
+    # ------------------------------------------------------------------
+    # Volume indicators
+    # ------------------------------------------------------------------
+
+    def _add_volume_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Volume-based technical indicators via ``ta.volume``."""
+        close = df["Close"]
+        high = df["High"]
+        low = df["Low"]
+        vol = df["Volume"].astype(float)
+
+        # Basic volume stats (kept from original)
         df["vol_change_1d"] = vol.pct_change(1)
         df["vol_ma_5"] = vol.rolling(5).mean()
         df["vol_ma_20"] = vol.rolling(20).mean()
         df["vol_ratio"] = vol / (df["vol_ma_20"] + 1e-10)
 
-        # Volume-Price Trend (VPT)
-        df["vpt"] = ((close.pct_change(1)) * vol).cumsum()
+        # --- On-Balance Volume (OBV) ---
+        df["obv"] = OnBalanceVolumeIndicator(
+            close=close, volume=vol
+        ).on_balance_volume()
 
-        # On-Balance Volume (simplified)
-        obv = pd.Series(0.0, index=df.index)
-        for i in range(1, len(df)):
-            if close.iloc[i] > close.iloc[i - 1]:
-                obv.iloc[i] = obv.iloc[i - 1] + vol.iloc[i]
-            elif close.iloc[i] < close.iloc[i - 1]:
-                obv.iloc[i] = obv.iloc[i - 1] - vol.iloc[i]
-            else:
-                obv.iloc[i] = obv.iloc[i - 1]
-        df["obv"] = obv
+        # --- Volume Price Trend (VPT) ---
+        df["vpt"] = VolumePriceTrendIndicator(
+            close=close, volume=vol
+        ).volume_price_trend()
 
-        return df
+        # --- Chaikin Money Flow (CMF) ---
+        df["cmf"] = ChaikinMoneyFlowIndicator(
+            high=high, low=low, close=close, volume=vol, window=20
+        ).chaikin_money_flow()
 
-    def _add_technical_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
-        """Common technical indicators computed with numpy/pandas only."""
-        close = df["Close"]
-        high = df["High"]
-        low = df["Low"]
+        # --- Money Flow Index (MFI) ---
+        df["mfi"] = MFIIndicator(
+            high=high, low=low, close=close, volume=vol, window=14
+        ).money_flow_index()
 
-        # --- Moving Averages ---
-        for window in [5, 10, 20, 60]:
-            df[f"sma_{window}"] = close.rolling(window).mean()
-        df["ema_12"] = close.ewm(span=12, adjust=False).mean()
-        df["ema_26"] = close.ewm(span=26, adjust=False).mean()
+        # --- Force Index ---
+        df["force_index"] = ForceIndexIndicator(
+            close=close, volume=vol, window=13
+        ).force_index()
 
-        # --- MACD ---
-        df["macd"] = df["ema_12"] - df["ema_26"]
-        df["macd_signal"] = df["macd"].ewm(span=9, adjust=False).mean()
-        df["macd_hist"] = df["macd"] - df["macd_signal"]
+        # --- Ease of Movement ---
+        df["ease_of_movement"] = EaseOfMovementIndicator(
+            high=high, low=low, volume=vol, window=14
+        ).ease_of_movement()
 
-        # --- RSI ---
-        delta = close.diff()
-        gain = delta.clip(lower=0)
-        loss = -delta.clip(upper=0)
-        avg_gain = gain.rolling(14).mean()
-        avg_loss = loss.rolling(14).mean()
-        rs = avg_gain / (avg_loss + 1e-10)
-        df["rsi_14"] = 100 - (100 / (1 + rs))
+        # --- Volume Weighted Average Price (VWAP) ---
+        df["vwap"] = VolumeWeightedAveragePrice(
+            high=high, low=low, close=close, volume=vol
+        ).volume_weighted_average_price()
 
-        # --- Bollinger Bands ---
-        sma20 = close.rolling(20).mean()
-        std20 = close.rolling(20).std()
-        df["bb_upper"] = sma20 + 2 * std20
-        df["bb_lower"] = sma20 - 2 * std20
-        df["bb_pct"] = (close - df["bb_lower"]) / (df["bb_upper"] - df["bb_lower"] + 1e-10)
-        df["bb_width"] = (df["bb_upper"] - df["bb_lower"]) / (sma20 + 1e-10)
+        # --- Accumulation/Distribution Index ---
+        df["adi"] = AccDistIndexIndicator(
+            high=high, low=low, close=close, volume=vol
+        ).acc_dist_index()
 
-        # --- Stochastic Oscillator ---
-        low14 = low.rolling(14).min()
-        high14 = high.rolling(14).max()
-        df["stoch_k"] = 100 * (close - low14) / (high14 - low14 + 1e-10)
-        df["stoch_d"] = df["stoch_k"].rolling(3).mean()
-
-        # --- ATR (Average True Range) ---
-        tr1 = high - low
-        tr2 = abs(high - close.shift(1))
-        tr3 = abs(low - close.shift(1))
-        tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-        df["atr_14"] = tr.rolling(14).mean()
-
-        # --- ADX (Average Directional Index) ---
-        plus_dm = high.diff()
-        minus_dm = -low.diff()
-        plus_dm = plus_dm.where((plus_dm > minus_dm) & (plus_dm > 0), 0.0)
-        minus_dm = minus_dm.where((minus_dm > plus_dm) & (minus_dm > 0), 0.0)
-        atr14 = tr.rolling(14).mean()
-        plus_di = 100 * plus_dm.rolling(14).mean() / (atr14 + 1e-10)
-        minus_di = 100 * minus_dm.rolling(14).mean() / (atr14 + 1e-10)
-        dx = 100 * abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
-        df["adx"] = dx.rolling(14).mean()
-
-        # --- Williams %R ---
-        df["willr"] = -100 * (high14 - close) / (high14 - low14 + 1e-10)
-
-        # --- CCI (Commodity Channel Index) ---
-        typical_price = (high + low + close) / 3
-        sma_tp = typical_price.rolling(20).mean()
-        mad = typical_price.rolling(20).apply(lambda x: np.abs(x - x.mean()).mean(), raw=True)
-        df["cci"] = (typical_price - sma_tp) / (0.015 * mad + 1e-10)
+        # --- Negative Volume Index ---
+        df["nvi"] = NegativeVolumeIndexIndicator(
+            close=close, volume=vol
+        ).negative_volume_index()
 
         return df
+
+    # ------------------------------------------------------------------
+    # Lag features
+    # ------------------------------------------------------------------
 
     def _add_lag_features(self, df: pd.DataFrame) -> pd.DataFrame:
         """Lagged features for key indicators."""
-        lag_cols = ["ret_1d", "rsi_14", "macd_hist", "bb_pct", "vol_ratio"]
+        lag_cols = [
+            "ret_1d", "rsi_14", "macd_hist", "bb_pct", "vol_ratio",
+            "atr_pct_14", "cci",
+        ]
         for col in lag_cols:
             if col in df.columns:
                 for lag in [1, 2, 3]:
                     df[f"{col}_lag{lag}"] = df[col].shift(lag)
         return df
+
+    # ------------------------------------------------------------------
+    # Rolling statistics
+    # ------------------------------------------------------------------
 
     def _add_rolling_features(self, df: pd.DataFrame) -> pd.DataFrame:
         """Rolling statistical features."""
@@ -215,6 +449,10 @@ class FeatureEngineer:
 
         return df
 
+    # ------------------------------------------------------------------
+    # Target label
+    # ------------------------------------------------------------------
+
     def _add_target(self, df: pd.DataFrame) -> pd.DataFrame:
         """Construct the prediction target."""
         close = df["Close"]
@@ -225,7 +463,6 @@ class FeatureEngineer:
         elif self.label_method == "return":
             df["target"] = future_return
         elif self.label_method == "excess_return":
-            # Use a simple zero baseline; can be replaced with benchmark return
             df["target"] = (future_return > 0).astype(int)
         else:
             raise ValueError(f"Unknown label_method: {self.label_method}")
